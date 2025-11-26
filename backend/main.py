@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 import sys
 import os
 import logging
@@ -64,6 +64,7 @@ async def root():
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <title>sorter</title>
     <style>
         :root {
@@ -649,8 +650,17 @@ async def root():
         preloadQueue();
     </script>
 </body>
-</html>
+    </html>
     """
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Serve the favicon"""
+    frontend_dir = Path(__file__).parent.parent / "frontend"
+    favicon_path = frontend_dir / "favicon.ico"
+    if favicon_path.exists():
+        return FileResponse(favicon_path)
+    return {"error": "favicon not found"}, 404
 
 @app.get("/cameras")
 async def get_cameras():

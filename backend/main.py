@@ -18,12 +18,13 @@ from immich_client import ImmichClient
 # Setup logging
 log_dir = Path(__file__).parent.parent / "logs"
 log_dir.mkdir(exist_ok=True)
+log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
@@ -53,7 +54,7 @@ logger.info(f"Connected to Immich at {immich.base}")
 @app.on_event("startup")
 async def startup_event():
     logger.info("FastAPI application started")
-    logger.info(f"Log file: {log_dir / f'app_{datetime.now().strftime('%Y%m%d')}.log'}")
+    logger.info(f"Log file: {log_file}")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -110,7 +111,7 @@ async def root():
         
         .main {
             display: grid;
-            grid-template-columns: 1fr 200px;
+            grid-template-columns: 1fr 220px;
             gap: 20px;
             margin-bottom: 15px;
         }
@@ -132,8 +133,9 @@ async def root():
         }
         
         #photo, #video {
-            max-width: 100%;
-            max-height: 55vh;
+            width: 100%;
+            height: auto;
+            max-height: 65vh;
             object-fit: contain;
         }
         
@@ -205,10 +207,109 @@ async def root():
             color: var(--text-dim);
             font-size: 11px;
             min-height: 16px;
+            transition: opacity 0.3s ease;
         }
         
         .status-bar.ok { color: var(--jade); }
         .status-bar.err { color: #8a5a5a; }
+        .status-bar.fading {
+            animation: statusFade 1.2s steps(8, end) forwards;
+        }
+        
+        @keyframes statusFade {
+            0% { opacity: 1; }
+            40% { opacity: 0.9; }
+            60% { opacity: 0.6; }
+            80% { opacity: 0.3; }
+            100% { opacity: 0; }
+        }
+        
+        .history {
+            margin-top: 10px;
+            border: 1px solid var(--border);
+            background: var(--bg-light);
+            padding: 12px;
+            font-size: 11px;
+        }
+        
+        .history h3 {
+            color: var(--jade);
+            font-weight: normal;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        
+        .history-entry {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 6px;
+            border: 1px dashed var(--border);
+            color: var(--text-dim);
+            font-family: inherit;
+        }
+        
+        .history-entry.success { color: var(--jade); border-color: var(--jade-dim); }
+        .history-entry.error { color: #8a5a5a; border-color: #8a5a5a33; }
+        
+        .history-time { font-size: 10px; color: var(--text-dim); }
+        .history-text { font-size: 11px; color: var(--text-bright); }
+        .history-empty { color: var(--text-dim); font-style: italic; }
+        
+        @media (max-width: 768px) {
+            .wrap {
+                padding: 12px 12px 24px;
+            }
+            
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 6px;
+            }
+            
+            .main {
+                display: block;
+            }
+            
+            .frame {
+                min-height: 60vh;
+                margin-bottom: 18px;
+            }
+            
+            .sidebar {
+                margin-top: 18px;
+            }
+            
+            .controls {
+                flex-wrap: wrap;
+                gap: 16px;
+                position: sticky;
+                bottom: 0;
+                background: var(--bg-light);
+                padding: 18px 12px;
+                z-index: 5;
+            }
+            
+            .ctrl {
+                flex: 1 1 calc(50% - 16px);
+                border: 1px solid var(--border);
+                padding: 12px 0;
+                text-align: center;
+                border-radius: 4px;
+            }
+            
+            #photo, #video {
+                max-height: calc(100vh - 220px);
+            }
+        }
         
         .empty {
             color: var(--text-dim);
@@ -261,6 +362,13 @@ async def root():
         </div>
         
         <div class="status-bar" id="status"></div>
+        
+        <div class="history">
+            <h3>history</h3>
+            <div class="history-list" id="historyList">
+                <div class="history-empty">no decisions yet</div>
+            </div>
+        </div>
     </div>
     
     <script>
@@ -268,12 +376,64 @@ async def root():
         let imageQueue = []; // Queue of preloaded images
         const QUEUE_SIZE = 3; // Preload 3 images ahead
         let isPreloading = false;
+        const MAX_HISTORY = 10;
+        const historyEntries = [];
+        const ACTION_LABELS = {
+            'delete': 'del',
+            'keep': 'skip',
+            'fav': 'fav',
+            'archive': 'archive'
+        };
+        
+        let statusTimer = null;
+        let fadeTimer = null;
         
         function showStatus(message, type = 'info') {
             const status = document.getElementById('status');
+            
+            if (statusTimer) clearTimeout(statusTimer);
+            if (fadeTimer) clearTimeout(fadeTimer);
+            
+            status.className = 'status-bar';
+            status.classList.remove('ok', 'err', 'fading');
+            if (type === 'success') status.classList.add('ok');
+            if (type === 'error') status.classList.add('err');
+            
             status.textContent = `> ${message}`;
-            status.className = `status-bar ${type === 'success' ? 'ok' : type === 'error' ? 'err' : ''}`;
-            setTimeout(() => { status.textContent = ''; }, 2000);
+            status.style.opacity = '1';
+            
+            statusTimer = setTimeout(() => {
+                status.classList.add('fading');
+                fadeTimer = setTimeout(() => {
+                    status.textContent = '';
+                    status.className = 'status-bar';
+                }, 1200);
+            }, 5000);
+        }
+        
+        function renderHistory() {
+            const list = document.getElementById('historyList');
+            if (!historyEntries.length) {
+                list.innerHTML = '<div class="history-empty">no decisions yet</div>';
+                return;
+            }
+            list.innerHTML = historyEntries.map(entry => `
+                <div class="history-entry ${entry.type}">
+                    <span class="history-text">${entry.text}</span>
+                    <span class="history-time">${entry.time}</span>
+                </div>
+            `).join('');
+        }
+        
+        function addHistoryEntry(message, type = 'success') {
+            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            historyEntries.unshift({
+                text: `> ${message}`,
+                time: timestamp,
+                type: type === 'error' ? 'error' : 'success'
+            });
+            if (historyEntries.length > MAX_HISTORY) historyEntries.pop();
+            renderHistory();
         }
         
         function setLoading(loading) {
@@ -472,15 +632,10 @@ async def root():
         async function sendAction(action) {
             if (!currentId) return;
             
-            const actionNames = {
-                'delete': 'del',
-                'keep': 'skip',
-                'fav': 'fav',
-                'archive': 'archive'
-            };
-            
             // Store for undo
             lastAction = { id: currentId, action: action };
+            
+            const actionLabel = ACTION_LABELS[action] || action;
             
             // Send action in background, don't wait
             fetch(`/action/${currentId}?action=${action}`, {
@@ -488,9 +643,11 @@ async def root():
             }).catch(error => {
                 console.error('Action error:', error);
                 showStatus(`Error: ${error.message}`, 'error');
+                addHistoryEntry(`${actionLabel} failed`, 'error');
             });
             
-            showStatus(`${actionNames[action]} [ctrl+z undo]`, 'success');
+            showStatus(`${actionLabel} [ctrl+z undo]`, 'success');
+            addHistoryEntry(actionLabel, 'success');
             
             // Immediately load next (should be instant from queue)
             loadNext();
@@ -511,12 +668,15 @@ async def root():
                 
                 if (data.error) {
                     showStatus(`undo failed: ${data.error}`, 'error');
+                    addHistoryEntry(`undo ${ACTION_LABELS[action] || action} failed`, 'error');
                 } else {
                     showStatus(`undone`, 'success');
+                    addHistoryEntry(`undo ${ACTION_LABELS[action] || action}`, 'success');
                     lastAction = null;
                 }
             } catch (error) {
                 showStatus(`undo failed: ${error.message}`, 'error');
+                addHistoryEntry(`undo ${ACTION_LABELS[action] || action} failed`, 'error');
             }
         }
         
@@ -535,6 +695,7 @@ async def root():
         });
         
         // Load first image and start preloading queue
+        renderHistory();
         loadNext();
         preloadQueue();
     </script>

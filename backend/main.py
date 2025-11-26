@@ -23,7 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_dir / f"app_{datetime.now().strftime("%Y%m%d")}.log"),
+        logging.FileHandler(log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"),
         logging.StreamHandler()
     ]
 )
@@ -53,7 +53,13 @@ logger.info(f"Connected to Immich at {immich.base}")
 @app.on_event("startup")
 async def startup_event():
     logger.info("FastAPI application started")
-    logger.info(f"Log file: {log_dir / f'app_{datetime.now().strftime("%Y%m%d")}.log'}")
+    log_file = log_dir / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+    logger.info(f"Log file: {log_file}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down, closing connections...")
+    await immich.close()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -324,6 +330,7 @@ async def root():
         const QUEUE_SIZE = 3; // Preload 3 images ahead
         let isPreloading = false;
         let selectedCameras = []; // Selected camera models for filtering
+        let seenAssetIds = new Set(); // Track seen assets to prevent duplicates
         
         function showStatus(message, type = 'info') {
             const status = document.getElementById('status');
@@ -464,9 +471,12 @@ async def root():
                 .map(opt => opt.value)
                 .filter(v => v); // Remove empty values
             
-            // Clear queue and reload when filter changes
+            // Clear queue and seen IDs when filter changes
             imageQueue = [];
+            seenAssetIds.clear();
             currentId = null;
+            currentAsset = null;
+            lastAction = null;  // Clear undo history too
             loadNext();
         }
         
@@ -494,9 +504,15 @@ async def root():
                     return;
                 }
                 
-                // Add to queue and preload images
+                // Add to queue and preload images (deduplicate)
                 const assets = data.assets || [data];
                 for (const asset of assets) {
+                    // Skip if we've already seen this asset
+                    if (seenAssetIds.has(asset.id)) {
+                        continue;
+                    }
+                    seenAssetIds.add(asset.id);
+                    
                     // Preload thumbnail immediately
                     const thumbImg = new Image();
                     thumbImg.src = asset.thumb_url;
@@ -519,6 +535,7 @@ async def root():
             if (imageQueue.length > 0) {
                 const asset = imageQueue.shift();
                 currentId = asset.id;
+                currentAsset = asset;  // Store for undo
                 displayImage(asset);
                 
                 // Trigger background preload for more images
@@ -557,11 +574,18 @@ async def root():
                     document.getElementById('photo').style.display = 'none';
                     document.getElementById('video').style.display = 'none';
                     currentId = null;
+                    currentAsset = null;
                     setLoading(false);
                     return;
                 }
                 
+                // Track seen asset
+                if (!seenAssetIds.has(data.id)) {
+                    seenAssetIds.add(data.id);
+                }
+                
                 currentId = data.id;
+                currentAsset = data;  // Store for undo
                 displayImage(data);
                 
                 // Start preloading queue for next images
@@ -572,11 +596,12 @@ async def root():
             }
         }
         
-        // Undo stack
+        // Undo stack - stores full asset data for restoration
         let lastAction = null;
+        let currentAsset = null;  // Store current asset for undo
         
         async function sendAction(action) {
-            if (!currentId) return;
+            if (!currentId || !currentAsset) return;
             
             const actionNames = {
                 'delete': 'del',
@@ -585,8 +610,11 @@ async def root():
                 'archive': 'archive'
             };
             
-            // Store for undo
-            lastAction = { id: currentId, action: action };
+            // Store full asset data for undo (so we can restore the UI)
+            lastAction = { 
+                asset: currentAsset,
+                action: action 
+            };
             
             // Send action in background, don't wait
             fetch(`/action/${currentId}?action=${action}`, {
@@ -608,17 +636,27 @@ async def root():
                 return;
             }
             
-            const { id, action } = lastAction;
+            const { asset, action } = lastAction;
             showStatus(`undoing ${action}...`, 'info');
             
             try {
-                const r = await fetch(`/undo/${id}?action=${action}`, { method: 'POST' });
+                const r = await fetch(`/undo/${asset.id}?action=${action}`, { method: 'POST' });
                 const data = await r.json();
                 
                 if (data.error) {
                     showStatus(`undo failed: ${data.error}`, 'error');
                 } else {
-                    showStatus(`undone`, 'success');
+                    // Put current image back into queue front
+                    if (currentAsset) {
+                        imageQueue.unshift(currentAsset);
+                    }
+                    
+                    // Restore the undone asset to the UI
+                    currentId = asset.id;
+                    currentAsset = asset;
+                    displayImage(asset);
+                    
+                    showStatus(`undone - vote again`, 'success');
                     lastAction = null;
                 }
             } catch (error) {
@@ -640,13 +678,14 @@ async def root():
             if (e.key === 'ArrowDown') sendAction('archive');
         });
         
-        // Initialize: load cameras and first image
-        loadCameras();
+        // Initialize: load first image immediately, cameras in background
         document.getElementById('cameraSelect').addEventListener('change', onCameraFilterChange);
         
-        // Load first image and start preloading queue
+        // Load first image immediately (don't wait for cameras)
         loadNext();
-        preloadQueue();
+        
+        // Load cameras in background (non-blocking)
+        setTimeout(() => loadCameras(), 100);
     </script>
 </body>
 </html>
@@ -728,32 +767,26 @@ async def next_image(count: int = 1, cameras: str = None):
 @app.get("/proxy/{asset_id}/{size}")
 async def proxy_image(asset_id: str, size: str):
     """Proxy images/videos through backend to add API key authentication"""
-    import httpx
     logger.debug(f"Proxying {size} for asset {asset_id}")
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                f"{immich.base}/assets/{asset_id}/{size}",
-                headers=immich.headers,
-                timeout=30.0,
-            )
-            r.raise_for_status()
-            from fastapi.responses import Response
-            
-            # Determine content type from response headers or size parameter
-            content_type = r.headers.get("content-type", "image/jpeg")
-            content_length = len(r.content)
-            if size == "original":
-                # For original, check if it might be a video
-                # Immich typically serves videos with video/* content type
-                if "video" in content_type.lower():
-                    content_type = content_type
-                elif not content_type.startswith("image/"):
-                    # Fallback: check file extension or assume video for large files
-                    content_type = "video/mp4"  # Common video format
-            
-            logger.debug(f"Serving {size} for {asset_id}: {content_type}, {content_length} bytes")
-            return Response(content=r.content, media_type=content_type)
+        # Use retry logic for proxy requests too
+        r = await immich.get_with_retry(f"{immich.base}/assets/{asset_id}/{size}", max_retries=1)
+        from fastapi.responses import Response
+        
+        # Determine content type from response headers or size parameter
+        content_type = r.headers.get("content-type", "image/jpeg")
+        content_length = len(r.content)
+        if size == "original":
+            # For original, check if it might be a video
+            # Immich typically serves videos with video/* content type
+            if "video" in content_type.lower():
+                content_type = content_type
+            elif not content_type.startswith("image/"):
+                # Fallback: check file extension or assume video for large files
+                content_type = "video/mp4"  # Common video format
+        
+        logger.debug(f"Serving {size} for {asset_id}: {content_type}, {content_length} bytes")
+        return Response(content=r.content, media_type=content_type)
     except Exception as e:
         logger.error(f"Error proxying {size} for {asset_id}: {e}", exc_info=True)
         raise

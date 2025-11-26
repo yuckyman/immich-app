@@ -462,31 +462,6 @@ async def root():
             }, 5000);
         }
         
-        function renderHistory() {
-            const list = document.getElementById('historyList');
-            if (!historyEntries.length) {
-                list.innerHTML = '<div class="history-empty">no decisions yet</div>';
-                return;
-            }
-            list.innerHTML = historyEntries.map(entry => `
-                <div class="history-entry ${entry.type}">
-                    <span class="history-text">${entry.text}</span>
-                    <span class="history-time">${entry.time}</span>
-                </div>
-            `).join('');
-        }
-        
-        function addHistoryEntry(message, type = 'success') {
-            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            historyEntries.unshift({
-                text: `> ${message}`,
-                time: timestamp,
-                type: type === 'error' ? 'error' : 'success'
-            });
-            if (historyEntries.length > MAX_HISTORY) historyEntries.pop();
-            renderHistory();
-        }
-        
         function setLoading(loading) {
             const frame = document.getElementById('frame');
             const empty = document.getElementById('empty');
@@ -764,7 +739,7 @@ async def root():
                 action: action 
             };
             
-            const actionLabel = ACTION_LABELS[action] || action;
+            const actionLabel = actionNames[action] || action;
             
             // Send action in background, don't wait
             fetch(`/action/${currentId}?action=${action}`, {
@@ -772,11 +747,9 @@ async def root():
             }).catch(error => {
                 console.error('Action error:', error);
                 showStatus(`Error: ${error.message}`, 'error');
-                addHistoryEntry(`${actionLabel} failed`, 'error');
             });
             
             showStatus(`${actionLabel} [ctrl+z undo]`, 'success');
-            addHistoryEntry(actionLabel, 'success');
             
             // Immediately load next (should be instant from queue)
             loadNext();
@@ -797,7 +770,6 @@ async def root():
                 
                 if (data.error) {
                     showStatus(`undo failed: ${data.error}`, 'error');
-                    addHistoryEntry(`undo ${ACTION_LABELS[action] || action} failed`, 'error');
                 } else {
                     // Put current image back into queue front
                     if (currentAsset) {
@@ -814,7 +786,6 @@ async def root():
                 }
             } catch (error) {
                 showStatus(`undo failed: ${error.message}`, 'error');
-                addHistoryEntry(`undo ${ACTION_LABELS[action] || action} failed`, 'error');
             }
         }
         

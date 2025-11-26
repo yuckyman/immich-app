@@ -1,0 +1,15 @@
+[Unit]
+Description=Immich Photo Sorter
+After=network.target
+
+[Service]
+Type=simple
+User=ian
+WorkingDirectory=/home/ian/scripts/sorter
+ExecStart=/home/ian/scripts/sorter/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

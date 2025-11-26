@@ -54,6 +54,27 @@ tail -f logs/app_$(date +%Y%m%d).log
 
 logs include: api requests, user actions, errors, asset types.
 
+## deploy (systemd)
+
+after pushing to github:
+```bash
+./deploy.sh git@github.com:username/sorter.git
+```
+
+this will:
+- clone to `~/scripts/sorter` on yuckbox
+- create venv and install deps
+- install and start systemd service
+
+access from any tailscale device: `http://yuckbox:8000`
+
+manual service control:
+```bash
+sudo systemctl status sorter
+sudo systemctl restart sorter
+sudo journalctl -u sorter -f
+```
+
 ## ideas
 
 - [x] undo last action

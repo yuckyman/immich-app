@@ -559,9 +559,9 @@ async def next_image(count: int = 1):
                 "id": asset["id"],
                 "type": asset.get("type", "IMAGE"),
                 "duration": asset.get("duration", "0:00:00.00000"),
-                "thumb_url": f"http://localhost:8000/proxy/{asset['id']}/thumbnail",
-                "image_url": f"http://localhost:8000/proxy/{asset['id']}/original",
-                "video_url": f"http://localhost:8000/proxy/{asset['id']}/original" if asset.get("type") == "VIDEO" else None,
+                "thumb_url": f"/proxy/{asset['id']}/thumbnail",
+                "image_url": f"/proxy/{asset['id']}/original",
+                "video_url": f"/proxy/{asset['id']}/original" if asset.get("type") == "VIDEO" else None,
                 "meta": {
                     "filename": asset.get("originalFileName", "--"),
                     "date": asset.get("fileCreatedAt", "")[:10] if asset.get("fileCreatedAt") else "--",

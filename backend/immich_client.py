@@ -68,7 +68,8 @@ class ImmichClient:
 
     async def delete(self, asset_id):
         async with httpx.AsyncClient() as client:
-            r = await client.delete(
+            r = await client.request(
+                "DELETE",
                 f"{self.base}/assets",
                 json={"ids": [asset_id]},
                 headers=self.headers,

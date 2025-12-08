@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 import sys
 import os
 import logging
@@ -71,6 +71,7 @@ async def root():
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sorter</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <style>
         :root {
             --jade: #3a7d6e;
@@ -438,6 +439,8 @@ async def root():
         let isPreloading = false;
         let selectedCameras = []; // Selected camera models for filtering
         let seenAssetIds = new Set(); // Track seen assets to prevent duplicates
+        let statusTimer = null;
+        let fadeTimer = null;
         
         function showStatus(message, type = 'info') {
             const status = document.getElementById('status');
@@ -815,6 +818,14 @@ async def root():
 </body>
 </html>
     """
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Serve favicon"""
+    favicon_path = Path(__file__).parent.parent / "frontend" / "favicon.ico"
+    if favicon_path.exists():
+        return FileResponse(favicon_path)
+    return {"error": "favicon not found"}, 404
 
 @app.get("/cameras")
 async def get_cameras():

@@ -9,11 +9,11 @@ class ImmichClient:
         self.client = httpx.AsyncClient(
             headers=self.headers,
             timeout=httpx.Timeout(60.0, connect=15.0),  # 60s total, 15s connect (increased for slow responses)
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),  # Reduced to avoid overwhelming server
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),  # Increased for better parallel performance
         )
         self._camera_cache = None
-        # Semaphore to limit concurrent requests (reduced to avoid overwhelming server)
-        self._semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
+        # Semaphore to limit concurrent requests (increased for better batch performance)
+        self._semaphore = asyncio.Semaphore(6)  # Max 6 concurrent requests
     
     async def get_with_retry(self, url, max_retries=2):
         """Get with retry logic and semaphore limiting"""
@@ -23,7 +23,7 @@ class ImmichClient:
                     r = await self.client.get(url)
                     r.raise_for_status()
                     return r
-                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                     if attempt < max_retries:
                         wait_time = 0.5 * (2 ** attempt)  # Exponential backoff: 0.5s, 1s
                         await asyncio.sleep(wait_time)
@@ -47,7 +47,7 @@ class ImmichClient:
                         r = await self.client.request(method, url, **kwargs)
                     r.raise_for_status()
                     return r
-                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                     if attempt < max_retries:
                         wait_time = 0.3 * (2 ** attempt)  # Shorter backoff for actions
                         await asyncio.sleep(wait_time)
@@ -72,30 +72,46 @@ class ImmichClient:
             else:
                 return [data]  # wrap single asset in list
         else:
-            # Fetch multiple random assets sequentially to avoid overwhelming server
-            # Process one at a time with small delays
+            # Fetch multiple random assets in parallel for better performance
             assets = []
             seen_ids = set()
+            max_attempts = limit * 3  # Try up to 3x limit to account for duplicates
             
-            for i in range(limit * 2):  # Try up to 2x limit to account for duplicates
-                if len(assets) >= limit:
-                    break
-                
+            async def fetch_one_asset():
+                """Fetch a single random asset"""
                 try:
                     r = await self.get_with_retry(f"{self.base}/assets/random")
                     data = r.json()
                     asset = data if isinstance(data, dict) else data[0] if isinstance(data, list) else None
-                    if asset and asset.get("id") not in seen_ids:
-                        assets.append(asset)
-                        seen_ids.add(asset["id"])
+                    return asset
                 except Exception:
-                    # If we get an error, wait a bit before retrying
-                    await asyncio.sleep(0.3)
-                    continue
+                    return None
+            
+            # Fetch in parallel batches
+            pending = set()
+            while len(assets) < limit and len(seen_ids) < max_attempts:
+                # Start new requests if we have capacity
+                while len(pending) < 6 and len(seen_ids) < max_attempts:
+                    task = asyncio.create_task(fetch_one_asset())
+                    pending.add(task)
                 
-                # Small delay between requests
-                if len(assets) < limit:
-                    await asyncio.sleep(0.2)
+                if not pending:
+                    break
+                
+                # Wait for at least one to complete
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                
+                for task in done:
+                    asset = await task
+                    if asset and asset.get("id") and asset.get("id") not in seen_ids:
+                        seen_ids.add(asset["id"])
+                        assets.append(asset)
+                        if len(assets) >= limit:
+                            # Cancel remaining tasks
+                            for t in pending:
+                                t.cancel()
+                            pending.clear()
+                            break
             
             return assets[:limit]
 
@@ -141,7 +157,8 @@ class ImmichClient:
         total_samples = min(sample_size, 8)
         cameras = set()
         
-        for i in range(total_samples):
+        # Fetch in parallel for faster camera discovery
+        async def fetch_camera():
             try:
                 r = await self.get_with_retry(f"{self.base}/assets/random")
                 data = r.json()
@@ -150,14 +167,18 @@ class ImmichClient:
                     exif = asset.get("exifInfo", {}) or {}
                     camera = exif.get("model")
                     if camera and camera != "--":
-                        cameras.add(camera)
+                        return camera
             except Exception:
-                # If we hit errors, stop early rather than continuing
-                break
-            
-            # Delay between each request
-            if i < total_samples - 1:
-                await asyncio.sleep(0.3)
+                pass
+            return None
+        
+        # Fetch all samples in parallel
+        tasks = [fetch_camera() for _ in range(total_samples)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if result and not isinstance(result, Exception):
+                cameras.add(result)
         
         self._camera_cache = sorted(list(cameras))
         return self._camera_cache
@@ -167,34 +188,53 @@ class ImmichClient:
         if not camera_models or len(camera_models) == 0:
             return await self.get_unreviewed(limit=limit)
         
-        # Fetch sequentially one at a time to avoid overwhelming server
+        # Fetch in parallel for better performance
         max_attempts = limit * 10  # Try up to 10x limit attempts
         matching_assets = []
         seen_ids = set()
-        attempts = 0
         
-        while len(matching_assets) < limit and attempts < max_attempts:
-            attempts += 1
+        async def fetch_and_filter():
+            """Fetch a single random asset and check if it matches"""
             try:
                 r = await self.get_with_retry(f"{self.base}/assets/random")
                 data = r.json()
                 asset = data if isinstance(data, dict) else data[0] if isinstance(data, list) else None
                 
-                if asset and asset.get("id") not in seen_ids:
+                if asset and asset.get("id") and asset.get("id") not in seen_ids:
                     seen_ids.add(asset.get("id"))
                     exif = asset.get("exifInfo", {}) or {}
                     camera = exif.get("model") or "--"
                     
                     if camera in camera_models:
-                        matching_assets.append(asset)
+                        return asset
             except Exception:
-                # On error, wait a bit before retrying
-                await asyncio.sleep(0.3)
-                continue
+                pass
+            return None
+        
+        # Fetch in parallel batches
+        pending = set()
+        while len(matching_assets) < limit and len(seen_ids) < max_attempts:
+            # Start new requests if we have capacity
+            while len(pending) < 6 and len(seen_ids) < max_attempts:
+                task = asyncio.create_task(fetch_and_filter())
+                pending.add(task)
             
-            # Delay between requests
-            if len(matching_assets) < limit:
-                await asyncio.sleep(0.25)
+            if not pending:
+                break
+            
+            # Wait for at least one to complete
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            
+            for task in done:
+                asset = await task
+                if asset:
+                    matching_assets.append(asset)
+                    if len(matching_assets) >= limit:
+                        # Cancel remaining tasks
+                        for t in pending:
+                            t.cancel()
+                        pending.clear()
+                        break
         
         return matching_assets[:limit]
 

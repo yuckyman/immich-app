@@ -44,7 +44,7 @@ if [ ! -f .env.local ]; then
     echo "==> WARNING: .env.local not found!"
     echo "Create it with:"
     echo "  cat > $INSTALL_DIR/.env.local << 'ENVEOF'"
-    echo "IMMICH_URL=http://100.114.1.102:2283/api"
+    echo "IMMICH_URL=http://homelab:2283/api"
     echo "IMMICH_API_KEY=your-api-key-here"
     echo "ENVEOF"
     echo ""

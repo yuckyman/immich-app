@@ -98,7 +98,7 @@ sudo journalctl -u sorter -f
 
 - [x] undo last action (with UI restoration)
 - [x] camera filter
-- [ ] stats counter (deleted/kept/fav'd)
+- [x] stats counter (deleted/kept/fav'd)
 - [ ] filter by date range
 - [ ] batch mode (grid selection)
 - [ ] theme toggle
